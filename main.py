@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
 from urllib.parse import urlparse, parse_qs
 import base64
 import json
@@ -68,6 +69,24 @@ exptoadd = nowtime.timestamp()
 cursor.execute("INSERT INTO keys (key, exp) VALUES (?, ?)", (expired_pem, int(exptoadd)))
 database.commit()
 
+# Function to retrieve the latest valid key from the database
+def get_valid_key():
+    cursor.execute("SELECT key FROM keys WHERE exp > ? ORDER BY exp DESC LIMIT 1", (int(datetime.datetime.now().timestamp()),))
+    row = cursor.fetchone()
+    if row:
+        return row[0]
+    else:
+        return None
+
+# Function to retrieve the latest expired key from the database
+def get_expired_key():
+    cursor.execute("SELECT key FROM keys WHERE exp < ? ORDER BY exp DESC LIMIT 1", (int(datetime.datetime.now().timestamp()),))
+    row = cursor.fetchone()
+    if row:
+        return row[0]
+    else:
+        return None 
+
 #class that handles requests to the server
 class MyServer(BaseHTTPRequestHandler):
     def do_PUT(self): #PUT requests are forbidden, so it just returns a 405
@@ -104,7 +123,11 @@ class MyServer(BaseHTTPRequestHandler):
             if 'expired' in params: #If "expired" is a parameter, returns the expired key
                 headers["kid"] = "expiredKID"
                 token_payload["exp"] = datetime.datetime.utcnow() - datetime.timedelta(hours=1)
-            encoded_jwt = jwt.encode(token_payload, pem, algorithm="RS256", headers=headers)
+                key = get_expired_key()
+            else:
+                key = get_valid_key()
+
+            encoded_jwt = jwt.encode(token_payload, key, algorithm="RS256", headers=headers)
             self.send_response(200)
             self.end_headers()
             self.wfile.write(bytes(encoded_jwt, "utf-8")) #returns the isnged JWT
@@ -119,6 +142,10 @@ class MyServer(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
+
+            valid_key = get_valid_key()
+            expired_key = get_expired_key()
+            
             keys = {
                 "keys": [
                     {
@@ -126,11 +153,24 @@ class MyServer(BaseHTTPRequestHandler):
                         "kty": "RSA",
                         "use": "sig",
                         "kid": "goodKID",
-                        "n": int_to_base64(numbers.public_numbers.n),
-                        "e": int_to_base64(numbers.public_numbers.e),
+                        "n": "",
+                        "e": "",
                     }
                 ]
             }
+
+            
+            valid_key = get_valid_key()
+            expired_key = get_expired_key()
+
+            if valid_key:
+                private_key = serialization.load_pem_private_key(valid_key, password=None, backend=default_backend())
+                public_key = private_key.public_key()
+                numbers = public_key.public_numbers()
+                keys["keys"][0]["n"] = int_to_base64(numbers.n)
+                keys["keys"][0]["e"] = int_to_base64(numbers.e)
+
+            
             self.wfile.write(bytes(json.dumps(keys), "utf-8")) #return a dump of all keys there are
             return
 
